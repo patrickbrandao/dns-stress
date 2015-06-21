@@ -11,6 +11,17 @@
 #include <netinet/in.h>
 #include <unistd.h>		//getpid
 
+#include <errno.h>
+
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/types.h>
+#include <signal.h>
+#include <sys/time.h>
+#include <math.h>
+
+
+
 #define T_ALL       0       // enviar de todo tipo
 #define T_A			1		// Ipv4 address
 #define T_NS        2    	// Nameserver           
@@ -32,6 +43,8 @@
 // Function Prototypes
 void dns_send_request (unsigned char* , int);
 void ChangetoDnsNameFormat (unsigned char*,unsigned char*);
+void dns_presend_request(unsigned char *host, int query_type);
+int ip_check_version(char *addr);
 
 //DNS header structure
 struct DNS_HEADER {
@@ -93,7 +106,19 @@ char *domainsfile;
 char *prefixfile;
 
 // nome do servidor dns
-char dns_server[16];
+char *dns_server;
+struct in6_addr ipv6server;
+struct in_addr ipv4server;
+struct hostent *res_server;
+
+// porta do servidor DNS
+int server_port = 0;
+
+// nome de host para envio simples
+unsigned char *hostname;
+
+// versao do protocolo ip
+int ip_version = 4;			// 4 = ipv4, 6=ipv6
 
 // atacar para sempre
 int forever = 0;
@@ -114,18 +139,19 @@ char prefixlist[PSIZE][PREFIXSIZE];
 int pindex = 0;	// ultimo indice da lista, ponteiro reiniciavel
 int psize = 0;	// numero de elementos na lista global
 
-// nome de host para envio simples
-unsigned char hostname[HOSTNAMESIZE];
 
 void usage(void){
 	fprintf(stderr,
 		"Usage: dns-stress [-k | -c COUNT] [-s DNS] [-n FQDN] [-f FILE] [-w]\n"
 		"  -c (count): numero de requisicoes a enviar\n"
 		"  -s (dns)  : ip de servidor DNS, padrao 127.0.0.1\n"
+		"  -P (port) : porta do servidor dns, padrao 53\n"
 		"  -f (file) : arquivo com 1 dominio por linha\n"
 		"  -p (file) : arquivo com 1 prefixo de dominio (nome de host) por linha\n"
 		"  -w        : adicionar www ao nome do dominio\n"
 		"  -k        : sufocar servidor, enviar a lista em loop inifito\n"
+		"  -4        : usar IPv4 (padrao)\n"
+		"  -6        : usar IPv6\n"
 		"  -n (fqdn) : nome do host, desativa uso da lista\n"
 		"  -t (type) : tipo de requisicao: A, NS, CNAME, SOA, PTR, MX, TXT, AAAA,\n"
 		"                                  SRV, NAPTR, OPT, TKEY, TSIG, MAILB, ANY\n"
@@ -137,6 +163,8 @@ void usage(void){
 
 
 int main (int argc, char **argv) {
+	char tmpstr[INET6_ADDRSTRLEN];
+
 	int ch;
 	int c;
 	int use_hostname = 0; // usar host unico em vez de lista
@@ -144,14 +172,21 @@ int main (int argc, char **argv) {
 	int rtype = 1; // tipo de registro dns, 1=A
 	char rname[10]; strcpy(rname, "a");
 
-	// usar localhost como padrao
-	strcpy(dns_server, "127.0.0.1");
+	//bzero(dns_server, INET6_ADDRSTRLEN);
+	//bzero(hostname, HOSTNAMESIZE);
 
-	while ((ch = getopt(argc, argv, "p:t:n:c:s:f:wkx")) != EOF) {
+	// strcpy(dns_server, "127.0.0.1");
+
+	while ((ch = getopt(argc, argv, "46p:P:t:n:c:s:f:wkx")) != EOF) {
 		switch(ch) {
 		case 'f':
 			domainsfile=(optarg); c++;
 			break;
+		case '4': ip_version = 4; break;
+		case '6': ip_version = 6; break;
+
+		case 'P': server_port = atoi(optarg); break;
+
 		case 'p':
 			prefixfile=(optarg); use_prefixes=1;
 			break;
@@ -159,11 +194,14 @@ int main (int argc, char **argv) {
 			use_www=1;
 			break;
 		case 's':
-			strncpy(dns_server, optarg, 15);
-			dns_server[15] = 0;
+			dns_server = (char*)optarg;
+			//strncpy(dns_server, optarg, strlen(optarg) );
+			// dns_server[15] = 0;
 			break;
 		case 'n':
-			strcpy(hostname, optarg);
+			hostname = (char*)optarg;
+			//strncpy(hostname, optarg, strlen(optarg) );
+			// strcpy(hostname, optarg);
 			use_hostname = 1;
 			break;
 		case 'c':
@@ -191,6 +229,45 @@ int main (int argc, char **argv) {
 	if(use_hostname && !hostname){ fprintf(stderr, "Erro: nome de host fqdn invalido\n"); usage(); }
 	if(qcount && forever){ fprintf(stderr, "Erro: escolha entre -k ou -c\n"); usage(); }
 
+	if(!server_port || server_port > 65535) server_port = 53;
+
+	// caso o usuario especifique o ip do servidor DNS, ajustar para o numero do protocolo IP utilizado
+	c = ip_check_version(dns_server);
+	if(c) ip_version = c;
+	
+	
+	// resolver nome, caso usuario tenha informado nome do servidor DNS
+	if(ip_version==6){
+		// obter ipv6
+		res_server = gethostbyname2(dns_server, AF_INET6);
+	}else{
+		// obter ipv4
+		res_server = gethostbyname(dns_server);
+	}
+
+	// problemas na resolucao de nomes
+	if( (res_server) == NULL){
+		fprintf(stderr,"error=resolv problem\n");
+		exit(2);
+	}
+
+	// extrair endereco IP binario da resolucao de DNS
+	if(ip_version==6){
+		// Obter ipv6 (128bits)
+		ipv6server = *((struct in6_addr *)res_server->h_addr);
+
+		inet_ntop(AF_INET6, *res_server->h_addr_list, tmpstr, sizeof(tmpstr));
+		printf("dns-stress server=%s address=%s port=%d\n", dns_server, tmpstr, server_port);
+	
+	}else{
+		// Obter ipv4 (32bits)
+		ipv4server = *((struct in_addr *)res_server->h_addr);
+
+		inet_ntop(AF_INET, *res_server->h_addr_list, tmpstr, sizeof(tmpstr));
+		printf("dns-stress server=%s address=%s port=%d\n", dns_server, tmpstr, server_port);
+	}
+
+
 	// ajustar tipo
 	if(rname){
 		for(c = 0; rname[c] && c < 10; c++) rname[c] = toupper(rname[c]);
@@ -217,8 +294,8 @@ int main (int argc, char **argv) {
 	}
 	if(rtype!=1) use_www = 0;
 
-	printf("DNS Stress:\n");
-	printf(" Servidor DNS..: %s\n", dns_server);
+//	printf("DNS Stress:\n");
+//	printf(" Servidor DNS..: %s - %s\n", dns_server, (ip_version==6?"IPv6":"IPv4"));
 	if(!use_scan)
 		printf(" Tipo..........: %s (%d)\n", rname, rtype);
 	else
@@ -359,7 +436,7 @@ int main (int argc, char **argv) {
 
 		// loop infinito por padrao
 		while(1){
-			unsigned char hostname[HOSTNAMESIZE];
+			unsigned char _hostname[HOSTNAMESIZE];
 			unsigned char xprefixhostname[HOSTNAMESIZE];			
 			
 			if(use_prefixes){
@@ -383,11 +460,12 @@ int main (int argc, char **argv) {
 				}
 
 			}else{
-				strcpy(hostname, globallist[j]);
+				strcpy(_hostname, globallist[j]);
+				//hostname = strdup((char *)globallist[j]);
 
 				// enviar para este dominio
-				printf("dns> %s request %d -> [%s]\n", rname, allcount++, hostname);
-				dns_presend_request(hostname, rtype);
+				printf("dns> %s request %d -> [%s]\n", rname, allcount++, _hostname);
+				dns_presend_request(_hostname, rtype);
 
 			}
 
@@ -414,6 +492,70 @@ int main (int argc, char **argv) {
 	return 0;
 }
 
+// verificar versao do endereco informado
+int ip_check_version(char *addr){
+	int c, ipv = 0; // 0 = desconhecido, 4=ipv4, 6=ipv6
+	
+	int slen = 0;
+	int found_dot = 0;
+	int found_colon = 0;
+	int found_num = 0;
+	int found_hex = 0;
+
+	slen = strlen(addr);
+	
+	// string vazia nao e' ip
+	if(!slen) return ipv;
+	
+	// percorrer byte a byte e coletar caracteres encontrados pelo tipo-familia
+	for(c=0; c < slen; c++){
+		char at = addr[c];
+		
+		// A-F a-f
+		//97 a 102
+		//65 a 70
+		if( (at >= 97 && at <= 102) || (at >= 97 && at <= 102) ){
+			// printf("FOUND HEX\n");
+			found_hex = 1;
+			continue;
+		}
+		
+		// 0-9
+		if(at >= 48 && at <= 57){
+			//printf("FOUND HEX/NUM\n");
+			found_num = 1;
+			found_hex = 1;
+			continue;
+		}
+		
+		// :
+		if(at==':'){
+			// printf("FOUND COLON\n");
+			found_colon = 1;
+			continue;
+		}
+
+		// .
+		if(at=='.'){
+			// printf("FOUND DOT\n");
+			found_dot = 1;
+			continue;
+		}
+	
+		// acabou
+		if(at=="\0") break;
+
+		// desconhecido para o formato ip4 e ip6
+		// printf("UNKNOW: [%c] [%d]\n", at, at);
+		return ipv;
+	}
+	
+	// detectar coerencia
+	if( (found_num && found_dot) && ! (found_colon || found_hex) ) ipv = 4;
+	if( ( found_hex && found_colon) && !found_dot ) ipv = 6;
+	
+	return ipv;
+}
 
 
 // Preparar chamada de requisicao por tipo
@@ -426,9 +568,6 @@ void dns_presend_request(unsigned char *host, int query_type){
 		slen = strlen(tmp);
 		
 		// enviar de todo tipo
-		
-
-
 		printf("   > A\n");		dns_send_request(tmp , T_A);		tmp[slen] = 0;
 		printf("   > NS\n");	dns_send_request(tmp , T_NS);		tmp[slen] = 0;
 
@@ -458,24 +597,53 @@ void dns_presend_request(unsigned char *host, int query_type){
 // Perform a DNS query by sending a packet
 void dns_send_request(unsigned char *host , int query_type){
 	unsigned char buf[65536],*qname,*reader;
-	int i , j , stop , s;
+	int i , j , stop , sockfd;
 
 	struct sockaddr_in a;
 
 	struct RES_RECORD answers[20],auth[20],addit[20]; //the replies from the DNS server
-	struct sockaddr_in dest;
+
+	struct sockaddr_in dest4;
+	struct sockaddr_in6 dest6;
 
 	struct DNS_HEADER *dns = NULL;
 	struct QUESTION *qinfo = NULL;
 
-	s = socket(AF_INET , SOCK_DGRAM , IPPROTO_UDP); //UDP packet for DNS queries
-
-	dest.sin_family = AF_INET;
-	dest.sin_port = htons(53);
+	if(ip_version==6){
 	
-	dest.sin_addr.s_addr = inet_addr(dns_server); //dns servers
+		// Criar socket ipv6
+		sockfd = socket(AF_INET6, SOCK_DGRAM , IPPROTO_UDP);
+		if (sockfd < 0){
+			fprintf(stderr,"error=socket problem ipv6\n");
+			exit(1);
+		}
 
-	//Set the DNS structure to standard queries
+		// IPv6	
+		memset((char *) &dest6, 0, sizeof(dest6));
+		dest6.sin6_flowinfo = 0;
+		dest6.sin6_family = AF_INET6;
+		dest6.sin6_addr = ipv6server;
+		dest6.sin6_port = htons(server_port);
+
+	}else{
+
+		// Criar socket ipv4
+		sockfd = socket(AF_INET, SOCK_DGRAM , IPPROTO_UDP);
+		if (sockfd < 0){
+			fprintf(stderr,"error=socket problem ipv4\n");
+			exit(1);
+		}
+
+		// IPv4
+		memset((char *) &dest4, 0, sizeof(dest4));
+
+		dest4.sin_family = AF_INET;
+		dest4.sin_port = htons(server_port);
+		dest4.sin_addr = ipv4server;
+
+	}
+
+	// Set the DNS structure to standard queries
 	dns = (struct DNS_HEADER *)&buf;
 
 	dns->id = (unsigned short) htons(getpid());
@@ -503,13 +671,39 @@ void dns_send_request(unsigned char *host , int query_type){
 	qinfo->qtype = htons( query_type );		// type of the query , A , MX , CNAME , NS etc
 	qinfo->qclass = htons(1);				// its internet (lol)
 
-	if( sendto(s,(char*)buf,sizeof(struct DNS_HEADER) + (strlen((const char*)qname)+1) + sizeof(struct QUESTION),0,(struct sockaddr*)&dest,sizeof(dest)) < 0 ){
-		perror("sendto failed");
+	// Enviar datagrama
+	if(ip_version == 6){
+
+		// Enviar em IPv6
+		if( sendto(
+				sockfd,
+				(char*)buf,sizeof(struct DNS_HEADER) + (strlen((const char*)qname)+1) + sizeof(struct QUESTION),
+				0,
+				(struct sockaddr*)&dest6,
+				sizeof(dest6)
+			) < 0 ){
+			perror("sendto failed ipv6");
+		}
+
+	}else{
+		
+		// Enviar em IPv4
+		if( sendto(
+				sockfd,
+				(char*)buf,sizeof(struct DNS_HEADER) + (strlen((const char*)qname)+1) + sizeof(struct QUESTION),
+				0,
+				(struct sockaddr*)&dest4,
+				sizeof(dest4)
+			) < 0 ){
+			perror("sendto failed ipv4");
+		}
+
 	}
+
 	
 	// fechar
-	shutdown(s, 0);
-	close(s);
+	shutdown(sockfd, 0);
+	close(sockfd);
 	
 	return;
 }
