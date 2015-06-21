@@ -543,7 +543,7 @@ int ip_check_version(char *addr){
 		}
 	
 		// acabou
-		if(at=="\0") break;
+		if(!at) break;
 
 		// desconhecido para o formato ip4 e ip6
 		// printf("UNKNOW: [%c] [%d]\n", at, at);
