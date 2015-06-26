@@ -4,12 +4,15 @@
 
 //Header Files
 #include <stdio.h>		//printf
+
 #include <string.h>		//strlen
-#include <stdlib.h>		//malloc
-#include <sys/socket.h>	//you know what this is for
-#include <arpa/inet.h>	//inet_addr , inet_ntoa , ntohs etc
+#include <ctype.h>
+
+#include <stdlib.h>		// malloc
+#include <sys/socket.h>	// network
+#include <arpa/inet.h>	//inet_addr, inet_ntoa, ntohs etc
 #include <netinet/in.h>
-#include <unistd.h>		//getpid
+#include <unistd.h>		// getpid, usleep
 
 #include <errno.h>
 
@@ -19,7 +22,6 @@
 #include <signal.h>
 #include <sys/time.h>
 #include <math.h>
-
 
 
 #define T_ALL       0       // enviar de todo tipo
@@ -115,7 +117,7 @@ struct hostent *res_server;
 int server_port = 0;
 
 // nome de host para envio simples
-unsigned char *hostname;
+char *hostname;
 
 // versao do protocolo ip
 int ip_version = 4;			// 4 = ipv4, 6=ipv6
@@ -125,9 +127,19 @@ int forever = 0;
 // numero de queries a enviar sem forever
 int qcount = 0;
 
+// mostrar mensagens na tela?
+int verbose = 1;
+
+// rodar em background?
+int dofork = 0;
+
+// limite de mensagens por segundo
+int perseclimit = 0;
+int limitpause = 0;
+
 // lista de todos os hosts (dominios e hosts)
 #define GSIZE 1000000
-#define HOSTNAMESIZE 100
+#define HOSTNAMESIZE 200
 char globallist[GSIZE][HOSTNAMESIZE];
 int gindex = 0;	// ultimo indice da lista, ponteiro reiniciavel
 int gsize = 0;	// numero de elementos na lista global
@@ -155,6 +167,9 @@ void usage(void){
 		"  -n (fqdn) : nome do host, desativa uso da lista\n"
 		"  -t (type) : tipo de requisicao: A, NS, CNAME, SOA, PTR, MX, TXT, AAAA,\n"
 		"                                  SRV, NAPTR, OPT, TKEY, TSIG, MAILB, ANY\n"
+		"  -q        : quieto, sem mensagens na tela\n"
+		"  -r (num)  : limite de requisicoes por segundo\n"
+		"  -d        : rodar em background e quieto\n"
 		"  -x        : enviar para o alvo todos os tipos de requisicao\n"
 		"\n"
 	);
@@ -165,6 +180,9 @@ void usage(void){
 int main (int argc, char **argv) {
 	char tmpstr[INET6_ADDRSTRLEN];
 
+	pid_t pid;
+	int mypid;
+	
 	int ch;
 	int c;
 	int use_hostname = 0; // usar host unico em vez de lista
@@ -177,65 +195,80 @@ int main (int argc, char **argv) {
 
 	// strcpy(dns_server, "127.0.0.1");
 
-	while ((ch = getopt(argc, argv, "46p:P:t:n:c:s:f:wkx")) != EOF) {
+	while ((ch = getopt(argc, argv, "dq46p:r:P:t:n:c:s:f:wkx")) != EOF) {
 		switch(ch) {
-		case 'f':
-			domainsfile=(optarg); c++;
-			break;
-		case '4': ip_version = 4; break;
-		case '6': ip_version = 6; break;
-
-		case 'P': server_port = atoi(optarg); break;
-
-		case 'p':
-			prefixfile=(optarg); use_prefixes=1;
-			break;
-		case 'w':
-			use_www=1;
-			break;
-		case 's':
-			dns_server = (char*)optarg;
-			//strncpy(dns_server, optarg, strlen(optarg) );
-			// dns_server[15] = 0;
-			break;
-		case 'n':
-			hostname = (char*)optarg;
-			//strncpy(hostname, optarg, strlen(optarg) );
-			// strcpy(hostname, optarg);
-			use_hostname = 1;
-			break;
-		case 'c':
-			qcount = atoi(optarg);
-			break;
-		case 't':
-			strncpy(rname, optarg, 9);
-			rname[9] = 0;
-			break;
-		case 'k':
-			forever = 1;
-			break;
-		case 'x':
-			use_scan = 1;
-			strcpy(rname, "all");
-			break;
-		case 'h':
-		case '?':
-		default:
-			usage();
+			case 'd': dofork = 1; verbose=0; break;
+			case 'q': verbose = 0; break;
+			case 'r': perseclimit = atoi(optarg); break;
+			case 'f':
+				domainsfile=(optarg); c++;
+				break;
+			case '4': ip_version = 4; break;
+			case '6': ip_version = 6; break;
+	
+			case 'P': server_port = atoi(optarg); break;
+	
+			case 'p':
+				prefixfile=(optarg); use_prefixes=1;
+				break;
+			case 'w':
+				use_www=1;
+				break;
+			case 's':
+				dns_server = (char*)optarg;
+				//strncpy(dns_server, optarg, strlen(optarg) );
+				// dns_server[15] = 0;
+				break;
+			case 'n':
+				hostname = (char*)optarg;
+				use_hostname = 1;
+				break;
+			case 'c':
+				qcount = atoi(optarg);
+				break;
+			case 't':
+				strncpy(rname, optarg, 9);
+				rname[9] = 0;
+				break;
+			case 'k':
+				forever = 1;
+				break;
+			case 'x':
+				use_scan = 1;
+				strcpy(rname, "all");
+				break;
+			case 'h':
+			case '?':
+			default:
+				usage();
 		}
 	}
 	if(!use_hostname && !domainsfile){ fprintf(stderr, "Erro: arquivo de dominio nao informado\n"); usage(); }
 	if(!dns_server){ fprintf(stderr, "Erro: servidor dns invalido\n"); usage(); }
 	if(use_hostname && !hostname){ fprintf(stderr, "Erro: nome de host fqdn invalido\n"); usage(); }
 	if(qcount && forever){ fprintf(stderr, "Erro: escolha entre -k ou -c\n"); usage(); }
+	limitpause = ( perseclimit ? ((1000000 / perseclimit)) : 0 );
 
 	if(!server_port || server_port > 65535) server_port = 53;
 
 	// caso o usuario especifique o ip do servidor DNS, ajustar para o numero do protocolo IP utilizado
 	c = ip_check_version(dns_server);
 	if(c) ip_version = c;
-	
-	
+
+
+	if ((pid = fork()) < 0){
+		perror("fork");
+		exit(1);
+	}
+	if (pid == 0){
+		// processo filho criado com sucesso
+		mypid = getpid();
+
+	}else{
+		// copia criada, finalizar processo pai
+		exit(0);
+	}
+
 	// resolver nome, caso usuario tenha informado nome do servidor DNS
 	if(ip_version==6){
 		// obter ipv6
@@ -257,14 +290,14 @@ int main (int argc, char **argv) {
 		ipv6server = *((struct in6_addr *)res_server->h_addr);
 
 		inet_ntop(AF_INET6, *res_server->h_addr_list, tmpstr, sizeof(tmpstr));
-		printf("dns-stress server=%s address=%s port=%d\n", dns_server, tmpstr, server_port);
+		if(verbose) printf("dns-stress server=%s address=%s port=%d\n", dns_server, tmpstr, server_port);
 	
 	}else{
 		// Obter ipv4 (32bits)
 		ipv4server = *((struct in_addr *)res_server->h_addr);
 
 		inet_ntop(AF_INET, *res_server->h_addr_list, tmpstr, sizeof(tmpstr));
-		printf("dns-stress server=%s address=%s port=%d\n", dns_server, tmpstr, server_port);
+		if(verbose) printf("dns-stress server=%s address=%s port=%d\n", dns_server, tmpstr, server_port);
 	}
 
 
@@ -294,23 +327,26 @@ int main (int argc, char **argv) {
 	}
 	if(rtype!=1) use_www = 0;
 
-//	printf("DNS Stress:\n");
-//	printf(" Servidor DNS..: %s - %s\n", dns_server, (ip_version==6?"IPv6":"IPv4"));
-	if(!use_scan)
-		printf(" Tipo..........: %s (%d)\n", rname, rtype);
-	else
-		printf(" Tipo..........: TODOS\n");
-
-	if(qcount){
-		printf(" Requisicoes...: %d\n", qcount);
-	}else{
-		printf(" Infinito......: %s\n", forever?"Sim":"Nao");
-	}
-	if(!use_hostname){
-		printf(" Arquivo.......: %s\n", domainsfile);
-		printf(" Adicionar www : %s\n", use_www?"Sim":"Nao");
-	}else{
-		printf(" Hostname......: %s\n", hostname);
+	if(verbose){
+		printf("DNS Stress:\n");
+		printf(" Servidor DNS..: %s - %s\n", dns_server, (ip_version==6?"IPv6":"IPv4"));
+		if(!use_scan)
+			printf(" Tipo..........: %s (%d)\n", rname, rtype);
+		else
+			printf(" Tipo..........: TODOS\n");
+	
+		if(qcount){
+			printf(" Requisicoes...: %d\n", qcount);
+		}else{
+			printf(" Infinito......: %s\n", forever?"Sim":"Nao");
+		}
+		if(!use_hostname){
+			printf(" Arquivo.......: %s\n", domainsfile);
+			printf(" Adicionar www : %s\n", use_www?"Sim":"Nao");
+		}else{
+			printf(" Hostname......: %s\n", hostname);
+		}
+		printf(" Req/s | pause.: %d | %d\n", perseclimit, limitpause);
 	}
 
 	// carregar lista de prefixos
@@ -339,7 +375,7 @@ int main (int argc, char **argv) {
 			// primeiro host
 			i = 0;
 			strcpy(prefixlist[pindex++], line);
-			printf("prefix> %s\n", line);
+			if(verbose) printf("prefix> %s\n", line);
 			
 			// limite atingido
 			if(pindex >= PSIZE) break;
@@ -351,7 +387,7 @@ int main (int argc, char **argv) {
 			use_prefixes = 0;
 		}else{
 			use_www = 0;
-			printf("prefix> total: %d prefixos\n", pindex);
+			if(verbose) printf("prefix> total: %d prefixos\n", pindex);
 		}
 	}
 
@@ -361,21 +397,31 @@ int main (int argc, char **argv) {
 		c=0;
 		while(forever || qcount-- > 0){
 			unsigned char xhostname[HOSTNAMESIZE];
-			strcpy(xhostname, hostname);
+			int hl=0,hi=0;
+
+			bzero(xhostname, HOSTNAMESIZE);
+
+			hl = strlen(hostname);
+			for(hi=0;hi<hl && hi<HOSTNAMESIZE-1;hi++) xhostname[hi] = hostname[hi];
 
 			if(use_prefixes){
+				int pl=0,pi=0;
+				xhostname[hi++] = '.';
+				pl = strlen(prefixlist[pidx]);
+				for(pi=0;pi<pl && (pi+hi+1) < HOSTNAMESIZE;pi++) xhostname[hi++] = prefixlist[pidx][pi];
+
 				// requisicao para lista de prefixos
-				sprintf(xhostname, "%s.%s", prefixlist[pidx], hostname);
+				//--sprintf(xhostname, "%s.%s", prefixlist[pidx], hostname);
 
 				// requisicao para nome concatenado
-				printf("dns> %s request %d -> [%s]\n", rname, ++c, xhostname);
+				if(verbose) printf("dns> %s request %d -> [%s]\n", rname, ++c, xhostname);
 
 				pidx++;
 				if(pidx>=pindex) pidx = 0;
 			}else{
 			
 				// requisicao para nome digitado
-				printf("dns> %s request %d -> [%s]\n", rname, ++c, xhostname);
+				if(verbose) printf("dns> %s request %d -> [%s]\n", rname, ++c, xhostname);
 			}
 			dns_presend_request(xhostname , rtype);
 		}
@@ -428,8 +474,8 @@ int main (int argc, char **argv) {
 		}
 
 		// processar lista global e enviar requisicoes	
-		printf("Iniciando envio\n");
-		printf("Lista de hosts: %d\n", gindex);
+		if(verbose) printf("Iniciando envio\n");
+		if(verbose) printf("Lista de hosts: %d\n", gindex);
 		gi = gindex;
 		j = 0;
 		
@@ -446,12 +492,11 @@ int main (int argc, char **argv) {
 				// enviar para todos os prefixos nesse dominio
 				for(pidx = 0; pidx < pindex; pidx++){
 
-	
 					// requisicao para lista de prefixos
 					sprintf(xprefixhostname, "%s.%s", prefixlist[pidx], globallist[j]);
-	
+
 					// requisicao para nome concatenado
-					printf("dns> %s request %d -> [%s]\n", rname, allcount++, xprefixhostname);
+					if(verbose) printf("dns> %s request %d -> [%s]\n", rname, allcount++, xprefixhostname);
 					dns_presend_request(xprefixhostname, rtype);
 
 					// modo contagem de requisicoes
@@ -464,7 +509,7 @@ int main (int argc, char **argv) {
 				//hostname = strdup((char *)globallist[j]);
 
 				// enviar para este dominio
-				printf("dns> %s request %d -> [%s]\n", rname, allcount++, _hostname);
+				if(verbose) printf("dns> %s request %d -> [%s]\n", rname, allcount++, _hostname);
 				dns_presend_request(_hostname, rtype);
 
 			}
@@ -568,23 +613,22 @@ void dns_presend_request(unsigned char *host, int query_type){
 		slen = strlen(tmp);
 		
 		// enviar de todo tipo
-		printf("   > A\n");		dns_send_request(tmp , T_A);		tmp[slen] = 0;
-		printf("   > NS\n");	dns_send_request(tmp , T_NS);		tmp[slen] = 0;
-
-		printf("   > CNAME\n");	dns_send_request(tmp , T_CNAME);	tmp[slen] = 0;
-		printf("   > SOA\n");	dns_send_request(tmp , T_SOA);		tmp[slen] = 0;
-		printf("   > PTR\n");	dns_send_request(tmp , T_PTR);		tmp[slen] = 0;
-		printf("   > MX\n");	dns_send_request(tmp , T_MX);		tmp[slen] = 0;
-		printf("   > TXT\n");	dns_send_request(tmp , T_TXT);		tmp[slen] = 0;
-		printf("   > SIG\n");	dns_send_request(tmp , T_SIG);		tmp[slen] = 0;
-		printf("   > AAAA\n");	dns_send_request(tmp , T_AAAA);		tmp[slen] = 0;
-		printf("   > SRV\n");	dns_send_request(tmp , T_SRV);		tmp[slen] = 0;
-		printf("   > NAPTR\n");	dns_send_request(tmp , T_NAPTR);	tmp[slen] = 0;
-		printf("   > OPT\n");	dns_send_request(tmp , T_OPT);		tmp[slen] = 0;
-		printf("   > TKEY\n");	dns_send_request(tmp , T_TKEY);		tmp[slen] = 0;
-		printf("   > TSIG\n");	dns_send_request(tmp , T_TSIG);		tmp[slen] = 0;
-		printf("   > MAILB\n");	dns_send_request(tmp , T_MAILB);	tmp[slen] = 0;
-		printf("   > ANY\n");	dns_send_request(tmp , T_ANY);		tmp[slen] = 0;
+		if(verbose) printf("   > A\n");		dns_send_request(tmp , T_A);		tmp[slen] = 0;
+		if(verbose) printf("   > NS\n");	dns_send_request(tmp , T_NS);		tmp[slen] = 0;
+		if(verbose) printf("   > CNAME\n");	dns_send_request(tmp , T_CNAME);	tmp[slen] = 0;
+		if(verbose) printf("   > SOA\n");	dns_send_request(tmp , T_SOA);		tmp[slen] = 0;
+		if(verbose) printf("   > PTR\n");	dns_send_request(tmp , T_PTR);		tmp[slen] = 0;
+		if(verbose) printf("   > MX\n");	dns_send_request(tmp , T_MX);		tmp[slen] = 0;
+		if(verbose) printf("   > TXT\n");	dns_send_request(tmp , T_TXT);		tmp[slen] = 0;
+		if(verbose) printf("   > SIG\n");	dns_send_request(tmp , T_SIG);		tmp[slen] = 0;
+		if(verbose) printf("   > AAAA\n");	dns_send_request(tmp , T_AAAA);		tmp[slen] = 0;
+		if(verbose) printf("   > SRV\n");	dns_send_request(tmp , T_SRV);		tmp[slen] = 0;
+		if(verbose) printf("   > NAPTR\n");	dns_send_request(tmp , T_NAPTR);	tmp[slen] = 0;
+		if(verbose) printf("   > OPT\n");	dns_send_request(tmp , T_OPT);		tmp[slen] = 0;
+		if(verbose) printf("   > TKEY\n");	dns_send_request(tmp , T_TKEY);		tmp[slen] = 0;
+		if(verbose) printf("   > TSIG\n");	dns_send_request(tmp , T_TSIG);		tmp[slen] = 0;
+		if(verbose) printf("   > MAILB\n");	dns_send_request(tmp , T_MAILB);	tmp[slen] = 0;
+		if(verbose) printf("   > ANY\n");	dns_send_request(tmp , T_ANY);		tmp[slen] = 0;
 
 	}else{
 		// apenas tipo solicitado
@@ -670,6 +714,11 @@ void dns_send_request(unsigned char *host , int query_type){
 
 	qinfo->qtype = htons( query_type );		// type of the query , A , MX , CNAME , NS etc
 	qinfo->qclass = htons(1);				// its internet (lol)
+
+	// pause entre pacotes para obedecer velocidade de requisicoes por segundo
+	if(limitpause) usleep(limitpause);
+	// int usleep(useconds_t useconds);
+
 
 	// Enviar datagrama
 	if(ip_version == 6){
